@@ -107,3 +107,6 @@ jekyll-archives:
   permalinks:
     tag: /tags/:name/
     category: /categories/:name/
+
+head_custom: |
+  <link rel="stylesheet" href="/assets/css/custom.css">

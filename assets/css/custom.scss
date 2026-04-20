@@ -1,0 +1,13 @@
+---
+---
+
+.preview-img {
+  height: 160px !important;
+  overflow: hidden !important;
+}
+
+.preview-img img {
+  width: 100% !important;
+  height: 160px !important;
+  object-fit: cover !important;
+}
