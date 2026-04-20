@@ -24,39 +24,6 @@ Con las credenciales obtenidas se accede al sistema, se descifran credenciales a
 mediante **DPAPI** y finalmente se abusa de **Resource-Based Constrained Delegation (RBCD)**
 para impersonar a un administrador del dominio y ejecutar un **DCSync**.
 
-### Cadena de ataque
-
-```
-P.Rosa (creds iniciales)
-    │
-    ▼
-PRE2k → FS01$ (contraseña predecible)
-    │
-    ▼
-ReadGMSAPassword → gMSA01$ (hash NTLM)
-    │
-    ▼
-AddSelf → grupo ServiceManagers
-    │
-    ▼
-GenericAll → habilitar SVC_SQL + asignar SPN
-    │
-    ▼
-Kerberoasting → hash TGS → contraseña Zer0the0ne
-    │
-    ▼
-Password Spray → C.Neri (WinRM)
-    │
-    ▼
-DPAPI → credenciales C.Neri_adm
-    │
-    ▼
-RBCD + S4U2Proxy → impersonar L.Bianchi_adm
-    │
-    ▼
-DCSync → hash Administrator → SYSTEM
-```
-
 ---
 
 ## Reconocimiento

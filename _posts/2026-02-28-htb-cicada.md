@@ -4,7 +4,7 @@ date: 2026-02-28 12:00:00 +0000
 categories: [WriteUp, HackTheBox]
 tags: [Active Directory, Windows, SMB, SeBackupPrivilege, NTDS, DCSync, RID-Brute, Lateral-Movement]
 image:
-  path: https://blog.vr0px.xyz/assets/img/posts//htb/cicada/CicadaLogo.png
+  path: /assets/img/cicada/cicada.png
   alt: HackTheBox Cicada Machine
   width: 500
   height: 280
